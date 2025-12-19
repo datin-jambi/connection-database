@@ -57,16 +57,16 @@ PORT=3000
 NODE_ENV=production
 
 # VPN Configuration
-VPN_SERVER=36.37.124.84
-VPN_USERNAME=adminbakeuda12
-VPN_PASSWORD=P4ssword12
+VPN_SERVER=
+VPN_USERNAME=
+VPN_PASSWORD=
 
 # Database
-DB_HOST=192.168.0.3
+DB_HOST=
 DB_PORT=5432
-DB_NAME=pgsamsatoldb
-DB_USER=viewer
-DB_PASSWORD=\433Ra+L:h=1
+DB_NAME=
+DB_USER=
+DB_PASSWORD=
 
 # Security
 ALLOWED_ORIGINS=http://localhost:3001,https://chatbot.example.com
@@ -124,7 +124,9 @@ curl http://localhost:3000/api/db/health
 
 ## 📡 API Endpoints
 
-### Health Check
+Service ini **read-only**, hanya untuk mengambil data dari database.
+
+### 1. Health Check
 ```bash
 GET /api/db/health
 ```
@@ -134,67 +136,147 @@ Response:
 {
   "success": true,
   "status": "healthy",
-  "database": "connected"
+  "database": "connected",
+  "timestamp": "2025-12-19T10:30:00.000Z"
 }
 ```
 
-### List Tables
+### 2. List All Tables (with Pagination)
 ```bash
-GET /api/db/tables
+GET /api/db/tables?page=1&limit=50
 ```
 
-Response:
-```json
-{
-  "success": true,
-  "tables": [
-    {"table_name": "users", "table_type": "BASE TABLE"}
-  ],
-  "count": 267
-}
-```
-
-### Query Database (SELECT)
-```bash
-POST /api/db/query
-Content-Type: application/json
-
-{
-  "query": "SELECT * FROM users WHERE id = $1",
-  "params": [1]
-}
-```
+Query Parameters:
+- `page` (optional): Page number, default `1`
+- `limit` (optional): Items per page, default `50`
 
 Response:
 ```json
 {
   "success": true,
   "data": [
-    {"id": 1, "name": "John Doe"}
+    {"table_name": "users", "table_type": "BASE TABLE"},
+    {"table_name": "orders", "table_type": "BASE TABLE"}
   ],
-  "rowCount": 1
+  "pagination": {
+    "total": 267,
+    "page": 1,
+    "limit": 50,
+    "totalPages": 6,
+    "hasNext": true,
+    "hasPrev": false
+  }
 }
 ```
 
-### Execute Query (INSERT/UPDATE/DELETE)
+### 3. Detail Table (Total Data + Field Info)
 ```bash
-POST /api/db/execute
-Content-Type: application/json
+GET /api/db/table/:tableName/info
+```
 
+Example:
+```bash
+GET /api/db/table/users/info
+```
+
+Response:
+```json
 {
-  "query": "UPDATE users SET name = $1 WHERE id = $2",
-  "params": ["Jane Doe", 1]
+  "success": true,
+  "table": "users",
+  "totalRows": 15420,
+  "fieldCount": 8,
+  "fields": [
+    {
+      "column_name": "id",
+      "data_type": "integer",
+      "character_maximum_length": null,
+      "is_nullable": "NO",
+      "column_default": "nextval('users_id_seq'::regclass)"
+    },
+    {
+      "column_name": "name",
+      "data_type": "character varying",
+      "character_maximum_length": 255,
+      "is_nullable": "YES",
+      "column_default": null
+    }
+  ]
 }
 ```
 
-### Get Table Data
+### 4. Select All Data from Table (with Pagination)
 ```bash
-GET /api/db/table/:tableName?limit=10&offset=0
+GET /api/db/table/:tableName/data?page=1&limit=100
 ```
 
-### Get Table Schema
+Query Parameters:
+- `page` (optional): Page number, default `1`
+- `limit` (optional): Items per page, default `100`
+
+Example:
 ```bash
-GET /api/db/schema/:tableName
+GET /api/db/table/users/data?page=2&limit=50
+```
+
+Response:
+```json
+{
+  "success": true,
+  "table": "users",
+  "data": [
+    {"id": 51, "name": "John Doe", "email": "john@example.com"},
+    {"id": 52, "name": "Jane Doe", "email": "jane@example.com"}
+  ],
+  "pagination": {
+    "total": 15420,
+    "page": 2,
+    "limit": 50,
+    "totalPages": 309,
+    "hasNext": true,
+    "hasPrev": true
+  }
+}
+```
+
+### 5. Detail Data (Single Row)
+```bash
+GET /api/db/table/:tableName/row?id=<value>&field=<fieldName>
+```
+
+Query Parameters:
+- `id` (required): Value to search
+- `field` (optional): Field name to search, default `id`
+
+Example:
+```bash
+# Search by ID (default)
+GET /api/db/table/users/row?id=123
+
+# Search by custom field
+GET /api/db/table/users/row?id=john@example.com&field=email
+```
+
+Response:
+```json
+{
+  "success": true,
+  "table": "users",
+  "data": {
+    "id": 123,
+    "name": "John Doe",
+    "email": "john@example.com",
+    "created_at": "2025-01-15T10:30:00.000Z"
+  }
+}
+```
+
+Error Response (Not Found):
+```json
+{
+  "success": false,
+  "error": "Data not found"
+}
 ```
 
 ## 💻 Development
@@ -299,12 +381,31 @@ const dbGateway = axios.create({
   headers: { 'X-API-Key': 'your-api-key' }
 });
 
-// Query
-const users = await dbGateway.post('/query', {
-  query: 'SELECT * FROM users LIMIT 10'
-});
+// 1. Health check
+const health = await dbGateway.get('/health');
+console.log(health.data.status);
 
+// 2. List tables with pagination
+const tables = await dbGateway.get('/tables?page=1&limit=50');
+console.log(`Total tables: ${tables.data.pagination.total}`);
+
+// 3. Get table info
+const tableInfo = await dbGateway.get('/table/users/info');
+console.log(`Total rows: ${tableInfo.data.totalRows}`);
+console.log(`Fields:`, tableInfo.data.fields);
+
+// 4. Get table data with pagination
+const users = await dbGateway.get('/table/users/data?page=1&limit=100');
+console.log(`Page ${users.data.pagination.page} of ${users.data.pagination.totalPages}`);
 console.log(users.data.data);
+
+// 5. Get single row detail
+const user = await dbGateway.get('/table/users/row?id=123');
+console.log(user.data.data);
+
+// Search by custom field
+const userByEmail = await dbGateway.get('/table/users/row?id=john@example.com&field=email');
+console.log(userByEmail.data.data);
 ```
 
 ### Python
@@ -314,21 +415,64 @@ import requests
 base_url = 'http://gateway-server:3000/api/db'
 headers = {'X-API-Key': 'your-api-key'}
 
-response = requests.post(
-    f'{base_url}/query',
-    json={'query': 'SELECT * FROM users LIMIT 10'},
+# 1. Health check
+response = requests.get(f'{base_url}/health', headers=headers)
+print(response.json()['status'])
+
+# 2. List tables
+response = requests.get(f'{base_url}/tables?page=1&limit=50', headers=headers)
+data = response.json()
+print(f"Total tables: {data['pagination']['total']}")
+
+# 3. Get table info
+response = requests.get(f'{base_url}/table/users/info', headers=headers)
+info = response.json()
+print(f"Total rows: {info['totalRows']}")
+print(f"Fields: {info['fields']}")
+
+# 4. Get table data with pagination
+response = requests.get(
+    f'{base_url}/table/users/data?page=1&limit=100',
     headers=headers
 )
+data = response.json()
+print(f"Page {data['pagination']['page']} of {data['pagination']['totalPages']}")
+for row in data['data']:
+    print(row)
 
-data = response.json()['data']
+# 5. Get single row detail
+response = requests.get(
+    f'{base_url}/table/users/row?id=123',
+    headers=headers
+)
+user = response.json()['data']
+print(user)
 ```
 
-### cURL
+### cURL Examples
 ```bash
-curl -X POST http://gateway-server:3000/api/db/query \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: your-api-key" \
-  -d '{"query": "SELECT * FROM users LIMIT 10"}'
+# 1. Health check
+curl http://localhost:3000/api/db/health
+
+# 2. List tables (page 1, 50 items)
+curl "http://localhost:3000/api/db/tables?page=1&limit=50" \
+  -H "X-API-Key: your-api-key"
+
+# 3. Get table info
+curl http://localhost:3000/api/db/table/users/info \
+  -H "X-API-Key: your-api-key"
+
+# 4. Get table data (page 2, 100 items)
+curl "http://localhost:3000/api/db/table/users/data?page=2&limit=100" \
+  -H "X-API-Key: your-api-key"
+
+# 5. Get single row by ID
+curl "http://localhost:3000/api/db/table/users/row?id=123" \
+  -H "X-API-Key: your-api-key"
+
+# Search by custom field
+curl "http://localhost:3000/api/db/table/users/row?id=john@example.com&field=email" \
+  -H "X-API-Key: your-api-key"
 ```
 
 ## 🔄 Production Deployment

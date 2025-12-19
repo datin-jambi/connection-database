@@ -4,7 +4,7 @@ import logger from '../utils/logger';
 
 const router = Router();
 
-// Health check endpoint
+// 1. Health check endpoint
 router.get('/health', async (_req: Request, res: Response) => {
   try {
     const client = await pool.connect();
@@ -28,134 +28,45 @@ router.get('/health', async (_req: Request, res: Response) => {
   }
 });
 
-// Execute SELECT query
-router.post('/query', async (req: Request, res: Response) => {
-  const { query, params } = req.body;
-  
-  if (!query) {
-    res.status(400).json({
-      success: false,
-      error: 'Query is required',
-    });
-    return;
-  }
-  
-  // Security: Only allow SELECT queries
-  const trimmedQuery = query.trim().toLowerCase();
-  if (!trimmedQuery.startsWith('select')) {
-    res.status(403).json({
-      success: false,
-      error: 'Only SELECT queries are allowed',
-    });
-    return;
-  }
-  
-  try {
-    const result = await pool.query(query, params || []);
-    
-    logger.info(`Query executed successfully. Rows: ${result.rowCount}`);
-    
-    res.json({
-      success: true,
-      data: result.rows,
-      rowCount: result.rowCount,
-      fields: result.fields.map(f => ({ name: f.name, dataType: f.dataTypeID })),
-    });
-  } catch (error: any) {
-    logger.error('Query execution failed:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Query execution failed',
-      message: error.message,
-    });
-  }
-});
+// 2. List all tables with pagination
+router.get('/tables', async (req: Request, res: Response) => {
+  const { page = 1, limit = 50 } = req.query;
+  const pageNum = Number(page);
+  const limitNum = Number(limit);
+  const offset = (pageNum - 1) * limitNum;
 
-// Execute raw query (for trusted clients only - more dangerous)
-router.post('/execute', async (req: Request, res: Response) => {
-  const { query, params } = req.body;
-  
-  if (!query) {
-    res.status(400).json({
-      success: false,
-      error: 'Query is required',
-    });
-    return;
-  }
-  
   try {
-    const result = await pool.query(query, params || []);
-    
-    logger.info(`Query executed. Command: ${result.command}, Rows affected: ${result.rowCount}`);
-    
-    res.json({
-      success: true,
-      data: result.rows,
-      rowCount: result.rowCount,
-      command: result.command,
-    });
-  } catch (error: any) {
-    logger.error('Query execution failed:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Query execution failed',
-      message: error.message,
-    });
-  }
-});
+    // Get total count
+    const countQuery = `
+      SELECT COUNT(*) as total
+      FROM information_schema.tables
+      WHERE table_schema = 'public';
+    `;
+    const countResult = await pool.query(countQuery);
+    const total = parseInt(countResult.rows[0].total);
 
-// Get table data
-router.get('/table/:tableName', async (req: Request, res: Response) => {
-  const { tableName } = req.params;
-  const { limit = 100, offset = 0 } = req.query;
-  
-  // Basic SQL injection prevention
-  if (!/^[a-zA-Z0-9_]+$/.test(tableName)) {
-    res.status(400).json({
-      success: false,
-      error: 'Invalid table name',
-    });
-    return;
-  }
-  
-  try {
-    const query = `SELECT * FROM ${tableName} LIMIT $1 OFFSET $2`;
-    const result = await pool.query(query, [limit, offset]);
-    
-    res.json({
-      success: true,
-      table: tableName,
-      data: result.rows,
-      rowCount: result.rowCount,
-      limit: Number(limit),
-      offset: Number(offset),
-    });
-  } catch (error: any) {
-    logger.error(`Failed to fetch table ${tableName}:`, error);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to fetch table data',
-      message: error.message,
-    });
-  }
-});
-
-// Get database tables list
-router.get('/tables', async (_req: Request, res: Response) => {
-  try {
+    // Get paginated tables
     const query = `
       SELECT table_name, table_type
       FROM information_schema.tables
       WHERE table_schema = 'public'
-      ORDER BY table_name;
+      ORDER BY table_name
+      LIMIT $1 OFFSET $2;
     `;
     
-    const result = await pool.query(query);
+    const result = await pool.query(query, [limitNum, offset]);
     
     res.json({
       success: true,
-      tables: result.rows,
-      count: result.rowCount,
+      data: result.rows,
+      pagination: {
+        total,
+        page: pageNum,
+        limit: limitNum,
+        totalPages: Math.ceil(total / limitNum),
+        hasNext: pageNum < Math.ceil(total / limitNum),
+        hasPrev: pageNum > 1,
+      },
     });
   } catch (error: any) {
     logger.error('Failed to fetch tables:', error);
@@ -167,10 +78,11 @@ router.get('/tables', async (_req: Request, res: Response) => {
   }
 });
 
-// Get table schema
-router.get('/schema/:tableName', async (req: Request, res: Response) => {
+// 3. Get table details (total data + field info)
+router.get('/table/:tableName/info', async (req: Request, res: Response) => {
   const { tableName } = req.params;
   
+  // Basic SQL injection prevention
   if (!/^[a-zA-Z0-9_]+$/.test(tableName)) {
     res.status(400).json({
       success: false,
@@ -180,7 +92,13 @@ router.get('/schema/:tableName', async (req: Request, res: Response) => {
   }
   
   try {
-    const query = `
+    // Get total rows count
+    const countQuery = `SELECT COUNT(*) as total FROM ${tableName}`;
+    const countResult = await pool.query(countQuery);
+    const totalRows = parseInt(countResult.rows[0].total);
+
+    // Get table columns/fields
+    const schemaQuery = `
       SELECT 
         column_name,
         data_type,
@@ -191,19 +109,127 @@ router.get('/schema/:tableName', async (req: Request, res: Response) => {
       WHERE table_schema = 'public' AND table_name = $1
       ORDER BY ordinal_position;
     `;
-    
-    const result = await pool.query(query, [tableName]);
+    const schemaResult = await pool.query(schemaQuery, [tableName]);
     
     res.json({
       success: true,
       table: tableName,
-      columns: result.rows,
+      totalRows,
+      fields: schemaResult.rows,
+      fieldCount: schemaResult.rowCount,
     });
   } catch (error: any) {
-    logger.error(`Failed to fetch schema for ${tableName}:`, error);
+    logger.error(`Failed to fetch table info for ${tableName}:`, error);
     res.status(500).json({
       success: false,
-      error: 'Failed to fetch table schema',
+      error: 'Failed to fetch table information',
+      message: error.message,
+    });
+  }
+});
+
+// 4. Select all data from table with pagination
+router.get('/table/:tableName/data', async (req: Request, res: Response) => {
+  const { tableName } = req.params;
+  const { page = 1, limit = 100 } = req.query;
+  const pageNum = Number(page);
+  const limitNum = Number(limit);
+  const offset = (pageNum - 1) * limitNum;
+  
+  // Basic SQL injection prevention
+  if (!/^[a-zA-Z0-9_]+$/.test(tableName)) {
+    res.status(400).json({
+      success: false,
+      error: 'Invalid table name',
+    });
+    return;
+  }
+  
+  try {
+    // Get total count
+    const countQuery = `SELECT COUNT(*) as total FROM ${tableName}`;
+    const countResult = await pool.query(countQuery);
+    const total = parseInt(countResult.rows[0].total);
+
+    // Get paginated data
+    const query = `SELECT * FROM ${tableName} LIMIT $1 OFFSET $2`;
+    const result = await pool.query(query, [limitNum, offset]);
+    
+    res.json({
+      success: true,
+      table: tableName,
+      data: result.rows,
+      pagination: {
+        total,
+        page: pageNum,
+        limit: limitNum,
+        totalPages: Math.ceil(total / limitNum),
+        hasNext: pageNum < Math.ceil(total / limitNum),
+        hasPrev: pageNum > 1,
+      },
+    });
+  } catch (error: any) {
+    logger.error(`Failed to fetch data from ${tableName}:`, error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch table data',
+      message: error.message,
+    });
+  }
+});
+
+// 5. Get detail/single row by ID or custom filter
+router.get('/table/:tableName/row', async (req: Request, res: Response) => {
+  const { tableName } = req.params;
+  const { id, field = 'id' } = req.query;
+  
+  // Basic SQL injection prevention
+  if (!/^[a-zA-Z0-9_]+$/.test(tableName)) {
+    res.status(400).json({
+      success: false,
+      error: 'Invalid table name',
+    });
+    return;
+  }
+
+  if (!/^[a-zA-Z0-9_]+$/.test(field as string)) {
+    res.status(400).json({
+      success: false,
+      error: 'Invalid field name',
+    });
+    return;
+  }
+
+  if (!id) {
+    res.status(400).json({
+      success: false,
+      error: 'ID parameter is required',
+    });
+    return;
+  }
+  
+  try {
+    const query = `SELECT * FROM ${tableName} WHERE ${field} = $1 LIMIT 1`;
+    const result = await pool.query(query, [id]);
+    
+    if (result.rowCount === 0) {
+      res.status(404).json({
+        success: false,
+        error: 'Data not found',
+      });
+      return;
+    }
+
+    res.json({
+      success: true,
+      table: tableName,
+      data: result.rows[0],
+    });
+  } catch (error: any) {
+    logger.error(`Failed to fetch row from ${tableName}:`, error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch data',
       message: error.message,
     });
   }
